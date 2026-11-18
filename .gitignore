@@ -6,3 +6,5 @@ __pycache__/
 !.env.example
 *.jsonl
 *.egg-info/
+# Evaluation results referenced in the README are kept in the repository
+!evals/results/*.jsonl
