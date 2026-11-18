@@ -41,10 +41,13 @@ def grade(case, summary, today):
     return checks
 
 
-async def evaluate(cases, output):
+async def evaluate(cases, output, pause=0.0):
     today = date.today()
     rows = []
-    for case in cases:
+    for index, case in enumerate(cases):
+        if index and pause:
+            # Free-tier providers limit tokens per minute; back-to-back cases hit HTTP 429.
+            await asyncio.sleep(pause)
         started = time.monotonic()
         records = await run(case["request"])
         summary = records[-1]
@@ -69,9 +72,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--only", nargs="*", help="Case ids to run, e.g. R01 R02")
     parser.add_argument("--output", default="research_eval_results.jsonl")
+    parser.add_argument("--pause", type=float, default=0.0,
+                        help="Seconds to wait between cases (e.g. 60 on a free tier)")
     args = parser.parse_args()
     cases = [case for case in CASES if not args.only or case["id"] in args.only]
-    asyncio.run(evaluate(cases, Path(args.output)))
+    asyncio.run(evaluate(cases, Path(args.output), pause=args.pause))
 
 
 if __name__ == "__main__":
