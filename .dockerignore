@@ -1,3 +1,10 @@
-# The image only needs requirements.txt. Keep secrets, envs and history out of the build context.
+# Only the files the image needs. Keep secrets (.env), venvs and history out of the build context.
 *
 !requirements.txt
+!pyproject.toml
+!README.md
+!src/
+!evals/
+!tests/
+**/__pycache__
+**/*.pyc
