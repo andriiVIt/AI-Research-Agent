@@ -3,6 +3,12 @@ import os
 from dataclasses import dataclass, field
 from urllib.parse import urlsplit
 
+from dotenv import find_dotenv, load_dotenv
+
+# Read a local, git-ignored .env from the working directory. Variables already set in the
+# shell take precedence over the file.
+load_dotenv(find_dotenv(usecwd=True), override=False)
+
 
 @dataclass(frozen=True)
 class Settings:
@@ -17,13 +23,14 @@ class Settings:
     def load(cls, *, model=None, base_url=None, api_key=None, temperature=0.2, timeout=60.0,
              openalex_api_key=None):
         settings = cls(
-            model=model or os.getenv("LLM_MODEL", "llama-3.3-70b-versatile"),
+            model=model or os.getenv("LLM_MODEL", "openai/gpt-oss-120b"),
             base_url=base_url or os.getenv("LLM_BASE_URL", "https://api.groq.com/openai/v1"),
             api_key=api_key if api_key is not None else os.getenv("LLM_API_KEY", ""),
             temperature=temperature,
             timeout=timeout,
             openalex_api_key=(openalex_api_key if openalex_api_key is not None
-                              else os.getenv("OPEN_ALEX_API_KEY", "")),
+                              else os.getenv("OPENALEX_API_KEY")
+                              or os.getenv("OPEN_ALEX_API_KEY", "")),
         )
         url = urlsplit(settings.base_url)
         local = url.scheme == "http" and url.hostname in {"localhost", "127.0.0.1", "::1"}
@@ -39,5 +46,5 @@ class Settings:
     def require_openalex_key(self) -> str:
         """Call this from the OpenAlex client, so only code that uses OpenAlex needs the key."""
         if not self.openalex_api_key:
-            raise ValueError("Set OPEN_ALEX_API_KEY before calling OpenAlex.")
+            raise ValueError("Set OPENALEX_API_KEY before calling OpenAlex.")
         return self.openalex_api_key
