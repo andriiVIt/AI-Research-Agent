@@ -10,7 +10,7 @@ Topic, year, citation count and operators (`>`, `>=`, `<`, `<=`, `==`) can be co
 
 ## Setup
 
-Use Python 3.11 or newer (tested with 3.11 and 3.14).
+Use Python 3.11 or newer (the evaluation below was run with Python 3.14).
 
 macOS or Linux:
 
@@ -47,7 +47,23 @@ Set `LLM_BASE_URL`, `LLM_MODEL` and `LLM_API_KEY` for an OpenAI-compatible Chat 
 python -m research.api.scout --demo --log demo_scout.jsonl                # offline, fixture data, no keys
 python -m research.api.scout "Find a paper about ..." --log scout.jsonl   # live
 python -m unittest -v                                                     # offline tests (mocked model and APIs)
-python -m evals.evaluate_research                                         # live eval cases in evals/research_cases.py
+python -m evals.evaluate_research --pause 60                              # live eval cases in evals/research_cases.py
+```
+
+Example of a live answer (abridged):
+
+```
+[answered]
+Recommended paper: Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks (2020)
+Authors: Patrick Lewis, Ethan Perez, Aleksandra Piktus, Fabio Petroni, Vladimir Karpukhin | Venue: arXiv (Cornell University)
+Link: https://doi.org/10.48550/arxiv.2005.11401
+Citations: 10277 according to OpenAlex (https://api.openalex.org/works/W3027879771, retrieved 2026-11-18)
+Constraints verified against source data: year < 2021 -> 2020 OK; citations > 500 -> 10277 OK
+
+Summary:
+The paper introduces Retrieval-Augmented Generation (RAG), a framework that couples a pre-trained sequence-to-sequence language model with a dense vector index of Wikipedia ...
+
+Uncertainty: The explanation is based on the title, abstract and metadata, not the full text. Citation counts change over time and differ between indexes.
 ```
 
 The CLI is also installed as `research-scout`. Each run prints the tool calls and the answer, and writes a JSONL trace.
@@ -60,6 +76,25 @@ docker run --rm research-scout                                      # offline de
 docker run --rm --env-file .env research-scout "Find a paper about ..." --log /tmp/run.jsonl
 ```
 
+## Agent workflow
+
+Each step is done either by the LLM or by deterministic Python code:
+
+| # | Step | Done by | Where |
+|---|---|---|---|
+| 1 | Parse the request: extract the topic, the year constraint (`>`, `>=`, `<`, `<=`, `==`, or "recent"), the citation constraint, and what kind of answer is wanted | **LLM** (as `search_papers` tool arguments) | `agents/scout.py` instructions |
+| 2 | Validate the constraints into a typed `Constraints` model; read the requested sentence count from the request text | **Code** | `schemas/paper.py` |
+| 3 | Search OpenAlex with the constraints as API filters | **Code** (tool) | `services/openalex.py` |
+| 4 | Filter the candidates again against the constraints; drop any result that violates them | **Code** | `deps.py` `check_paper` |
+| 5 | Choose the most relevant candidate and read its abstract (`get_paper`); optionally cross-check citations with Crossref | **LLM** chooses, **code** fetches | `tools/search.py`, `services/crossref.py` |
+| 6 | Search again with other topic wording if nothing fits; the year and citation constraints cannot change | **LLM** decides, **code** enforces | `deps.py` `search` |
+| 7 | Select the paper (`choose_paper`) or declare `report_no_match` | **LLM** proposes, **code** verifies (paper was returned and read, constraints hold) | `deps.py` `choose` |
+| 8 | Write the explanation: relevance, summary, or usefulness verdict | **LLM** | plain-text reply |
+| 9 | Validate the reply (sentence count, not just the title); ask the model to retry if it fails | **Code** | `agents/scout.py` `verify_answer` |
+| 10 | Render the final answer: title, authors, year, citations, citation source, link, checked constraints, uncertainty notes | **Code** | `agents/scout.py` `render` |
+
+**Structured output.** The constraints (`Constraints`, `Comparison`), the paper metadata (`Paper`), the citation evidence (`CitationEvidence`) and the final answer (`Recommendation` or `NoMatch`) are all Pydantic models (`src/research/schemas/paper.py`). The final `Recommendation` is assembled by Python from the verified `choose_paper` call and the model's prose. We do not ask the model to fill one large JSON object, because the tested model shortened long text inside tool-call or JSON fields (for example, it wrote only the paper title instead of a summary). Each run also writes a machine-readable JSONL trace with a `summary` record.
+
 ## How it works
 
 - Tools: `search_papers` → `get_paper` → (`cross_check_citations`) → `choose_paper` (or `report_no_match`), then the model replies with plain prose.
@@ -68,7 +103,7 @@ docker run --rm --env-file .env research-scout "Find a paper about ..." --log /t
 - An output validator checks the prose reply. It must have the requested sentence count (default 2-8) and must not just repeat the title. A rejected reply is retried up to twice.
 - Python renders the final answer. Title, year, citation count, the OpenAlex API URL and retrieval date (plus Crossref's count when there is a DOI) come from source data. Only the explanation comes from the model.
 - If nothing qualifies, the agent returns `no_match` instead of inventing a paper.
-- Provider notes: one fresh retry on Groq's intermittent `tool_use_failed`, with the same session and budget. `LLM_MAX_TOKENS` (default 800) stays under Groq's free-tier limit of 1000 output tokens per minute. Long prose is requested as the plain reply, never inside tool-call JSON, because the tested model filled such fields with just the paper title.
+- Provider notes: one fresh retry on Groq's intermittent `tool_use_failed`, with the same session and budget. `LLM_MAX_TOKENS` (default 800) caps each reply, which keeps runs within the free tier's tokens-per-minute limit (see [LLM choice](#llm-choice)). Long prose is requested as the plain reply, never inside tool-call JSON, because the tested model filled such fields with just the paper title.
 
 ## LLM choice
 
@@ -268,6 +303,16 @@ The model never hallucinated facts that the user sees as data, because none of t
 3. **Answer kind in Python.** Determine the answer kind from the request in code, as the sentence count already is, instead of trusting the model.
 4. **Check explanations automatically.** Use a FActScore-style claim check: split the explanation into claims and verify each against the abstract with a second, independent pass, and flag unsupported sentences.
 5. **Measure reliability.** Run each case k times and report pass^k. Also compare `openai/gpt-oss-20b` and other providers on the same set.
+
+## Group member contributions
+
+<!-- TODO: replace with real names and contributions before submission. Every member must also have meaningful commits. -->
+
+| Member | GitHub | Contributions |
+|---|---|---|
+| Andrii Savchenko | @andriiVIt | TODO |
+| TODO | TODO | TODO |
+| TODO | TODO | TODO |
 
 ## Layout
 
