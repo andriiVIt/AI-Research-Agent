@@ -133,7 +133,23 @@ def render(session: ResearchSession, output):
     heading = {"relevance": "Why it is relevant:", "summary": "Summary:",
                "usefulness": f"Usefulness verdict: {output.verdict}."}
     lines += ["", heading[output.answer_kind], output.explanation]
+    lines += ["", "Uncertainty: " + " ".join(uncertainty_notes(paper, evidence))]
     return "\n".join(lines)
+
+
+def uncertainty_notes(paper, evidence):
+    """Deterministic caveats, so the reader knows what the answer rests on."""
+    notes = []
+    if paper.abstract:
+        notes.append("The explanation is based on the title, abstract and metadata, not the full text.")
+    else:
+        notes.append("OpenAlex has no abstract for this paper, so the explanation rests on the "
+                     "title and metadata only.")
+    notes.append("Citation counts change over time and differ between indexes.")
+    if evidence.crossref_count is not None and evidence.crossref_count != evidence.count:
+        notes.append(f"Here OpenAlex reports {evidence.count} and Crossref {evidence.crossref_count}; "
+                     "the constraint was checked against OpenAlex.")
+    return notes
 
 
 def transcript_of(messages):

@@ -199,6 +199,9 @@ class TestAgent(unittest.TestCase):
         self.assertEqual(summary["citation_evidence"]["count"], 312)
         self.assertEqual(summary["citation_evidence"]["crossref_count"], 287)
         self.assertIn("https://api.openalex.org/works/W900001", summary["rendered"])
+        self.assertIn("Uncertainty: The explanation is based on the title, abstract and metadata",
+                      summary["rendered"])
+        self.assertIn("OpenAlex reports 312 and Crossref 287", summary["rendered"])
         self.assertNotIn(SECRET, json.dumps(session.trace) + json.dumps(summary))
 
     def test_scenario_summary_enforces_sentence_count(self):
