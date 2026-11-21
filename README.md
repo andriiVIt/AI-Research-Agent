@@ -262,17 +262,37 @@ For every answered case, we compared each claim in the model's explanation with 
 
 The raw results of these runs, with full agent traces, are in [`evals/results/`](evals/results/). New runs write to `research_eval_results.jsonl` in the working directory, which is git-ignored.
 
+#### Failure found in manual testing (outside the evaluation set)
+
+On 2026-11-19 we ran the R02 request by hand again: *"Find a paper about retrieval-augmented generation published before 2021 with more than 500 citations. Summarize its contribution in 5-7 sentences."* The full trace is in [`evals/results/manual_rag_before_2021.jsonl`](evals/results/manual_rag_before_2021.jsonl).
+
+| Turn | What the model did | What Python did |
+|---|---|---|
+| 1 | Its own reasoning said "before 2021", but it called `search_papers` with `year_op "<", year 2020` | Accepted the search. These became the **locked** constraints for the run. The OpenAlex filter was `publication_year:<2020`, which excludes the original RAG paper (2020) |
+| 2 | Said the results looked irrelevant and searched again with other topic wording, still `< 2020` | Accepted (same constraints) |
+| 3 | Tried to correct itself to `< 2021` | **Rejected**: the year constraint must stay `< 2020` |
+| 4 | Tried `<= 2020`, which means the same as `< 2021` for whole years | **Rejected**: the lock compares operator and value literally, not by meaning |
+| 5 | Gave up and searched with `< 2020` again | Accepted. Groq then stopped the run with HTTP 429 (`ModelRateLimitError`) |
+
+Two problems combined here:
+
+1. **The model misparsed the year.** The system prompt literally contains the example `"before 2021" -> "<"`, and the model still wrote 2020. The same request was parsed correctly in R02 and in our first live test, so this happens only sometimes. One run per case did not reveal it.
+2. **Our safeguard locked in the mistake.** Rejecting changes to the numeric constraints is meant to stop the model from quietly relaxing the request (for example, from "≥ 1000 citations" down to "≥ 100"). But Python locks the constraints from the model's *first* search and never checks them against the request text. So when the first search was wrong, the lock blocked both correct fixes.
+
+In this run, the error made the search **too narrow**: it removed every 2020 paper, including the original RAG paper, which the user would most likely want. Any paper the agent returned would still have satisfied "before 2021". The same mechanism is more dangerous in the other direction. Had the model written `< 2022`, a 2021 paper would have passed every Python check, because Python checks against the model's constraints, and only the evaluation's independent oracle would have caught it. We decided not to change the agent this close to the deadline, so the evaluation above still describes the tested code. The fix we would make is listed under *What we would improve*.
+
 ## Reflection
 
 **What worked well**
 
 - **Python owns every fact, so metadata never contained hallucinations.** The model never states a title, year, citation count or link. Python renders them from OpenAlex data and re-checks every constraint before the answer is shown. Across 14 cases there were 0 invented papers or numbers, and 0 constraint violations among the answered cases.
-- **Constraint parsing was reliable.** The model mapped "after", "before", "in", "at least", "more than", "fewer than", "at most" and "recent" to the correct operators in every case. The OpenAlex filter does the numeric filtering, so the LLM never has to compare numbers itself.
+- **Constraint parsing was mostly reliable.** In all 14 evaluation cases, the model mapped "after", "before", "in", "at least", "more than", "fewer than", "at most" and "recent" to the correct operators and values. The OpenAlex filter does the numeric filtering, so the LLM never has to compare numbers itself. A later manual run showed this is not guaranteed (see below).
 - **"No match" works.** Both impossible requests (R08, R13) ended in `no_match` instead of a near-miss paper. R13's explanation even gives the right reason: ChatGPT did not exist before 2015.
 - **Ambiguous requests were handled sensibly.** For "a well-known paper on transformers" (R10), the agent searched twice and picked *Attention Is All You Need*.
 
 **What failed or was unreliable**
 
+- **A misparsed year that our own safeguard then locked in.** This is the most instructive failure we saw. In a manual run, the model turned "before 2021" into `< 2020`, and Python's rule that the numeric constraints may not change between searches rejected both of the model's correct attempts to fix it. A safeguard that trusts the model's first output only enforces *consistency*, not *correctness*. Details are in [Failure found in manual testing](#failure-found-in-manual-testing-outside-the-evaluation-set).
 - **Free-tier rate limits were the biggest practical problem.** 6 of 14 cases failed with HTTP 429 in the first run. Even with a 60 s pause between cases, two cases failed again, because one long case can exhaust the tokens-per-minute budget on its own. Runs that hit the limit took around 40-50 s instead of around 4 s, because of client-side retries.
 - **The model chose the wrong answer kind.** In R04 and R09, the model chose `summary` although the request asked for neither a summary nor a usefulness verdict.
 - **Small distortions in the prose.** 6 of 12 explanations contained claims that were not fully supported by the abstract. Two were notable (R03, R12), for example dropping a qualifier or inferring "mobile phones" from "devices". The deterministic checks cannot catch this kind of error.
@@ -286,23 +306,24 @@ Every case used tools: 2-4 tool calls (3.1 on average) and 3-6 model turns (4.1 
 
 **Did the LLM hallucinate?**
 
-The model never hallucinated facts that the user sees as data, because none of those come from the model. In the free-text explanation it did produce smaller unsupported claims: overstatements, dropped qualifiers and background knowledge not found in the abstract (R03, R12, and minor cases R01, R04, R05, R10). It invented no papers, numbers or citations.
+The model never hallucinated facts that the user sees as data, because none of those come from the model. The year error in the manual run was a parsing mistake, not an invented fact. Here it only narrowed the search, but a mistake in the other direction would let a non-matching paper pass Python's checks. In the free-text explanation it did produce smaller unsupported claims: overstatements, dropped qualifiers and background knowledge not found in the abstract (R03, R12, and minor cases R01, R04, R05, R10). It invented no papers, numbers or citations.
 
 **How we prevented incorrect answers**
 
 - **Separation of concerns.** The LLM parses the request, picks a paper and writes prose. Deterministic code fetches data, filters by constraints, verifies the chosen paper and renders all metadata.
-- **Every model action passes through a trusted session (`ResearchSession`).** It accepts only paper IDs that OpenAlex actually returned. It refuses `choose_paper` for a paper that was not read or that violates a constraint, and it blocks later searches that relax the numeric constraints.
+- **Every model action passes through a trusted session (`ResearchSession`).** It accepts only paper IDs that OpenAlex actually returned. It refuses `choose_paper` for a paper that was not read or that violates a constraint, and it blocks later searches that relax the numeric constraints. Its limitation is that it checks constraints against the model's first search, not against the request itself.
 - **An output validator** rejects replies with the wrong sentence count or replies that only repeat the title.
 - **Hard budgets** (7 tool calls, 9 model turns, 120 s) stop runaway loops.
 - **The evaluation's oracle** is independent of the agent: expected constraints are declared per case and checked against source data.
 
 **What we would improve with more time**
 
-1. **Retry rate limits properly.** Honour `Retry-After` on HTTP 429 inside the agent, and add a token-aware delay to the evaluator, so free-tier runs are not lost.
-2. **Rank before choosing.** Fetch more candidates and let the model, or an embedding similarity score, rank them against the full request before choosing, so that "mobile devices" is not dropped from the topic.
-3. **Answer kind in Python.** Determine the answer kind from the request in code, as the sentence count already is, instead of trusting the model.
-4. **Check explanations automatically.** Use a FActScore-style claim check: split the explanation into claims and verify each against the abstract with a second, independent pass, and flag unsupported sentences.
-5. **Measure reliability.** Run each case k times and report pass^k. Also compare `openai/gpt-oss-20b` and other providers on the same set.
+1. **Check the constraints against the request text.** Parse explicit phrases such as "before 2021", "in 2018" and "at least 100 citations" in Python, as the sentence count already is. Reject a `search_papers` call whose arguments disagree, before anything is locked, and tell the model the expected values. Compare constraints by meaning, so that `< 2021` and `<= 2020` are treated as equal.
+2. **Retry rate limits properly.** Honour `Retry-After` on HTTP 429 inside the agent, and add a token-aware delay to the evaluator, so free-tier runs are not lost.
+3. **Rank before choosing.** Fetch more candidates and let the model, or an embedding similarity score, rank them against the full request before choosing, so that "mobile devices" is not dropped from the topic.
+4. **Answer kind in Python.** Determine the answer kind from the request in code, as the sentence count already is, instead of trusting the model.
+5. **Check explanations automatically.** Use a FActScore-style claim check: split the explanation into claims and verify each against the abstract with a second, independent pass, and flag unsupported sentences.
+6. **Measure reliability.** Run each case k times and report pass^k; the manual run above shows that a case can pass once and fail on a rerun. Also compare `openai/gpt-oss-20b` and other providers on the same set.
 
 ## Group member contributions
 
