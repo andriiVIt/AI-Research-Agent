@@ -30,7 +30,7 @@ TOOL_LIMIT = 7
 REQUEST_LIMIT = 9
 PROVIDER_ATTEMPTS = 2  # one fresh retry when the provider fails to generate a tool call
 DEFAULT_SENTENCES = (2, 8)
-# Groq's free tier rejects any request whose max_tokens exceeds its 1000 output-tokens/minute cap.
+# Caps each reply so a run stays within the provider's free-tier tokens-per-minute limit.
 MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "800"))
 INSTRUCTIONS = """You are Research Scout. You find ONE research paper that satisfies the user's
 request and explain it, using only facts returned by your tools.

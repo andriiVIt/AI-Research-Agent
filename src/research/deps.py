@@ -95,7 +95,7 @@ class ResearchSession:
                 dropped += 1
         feedback = (f"{len(kept)} paper(s) satisfy the constraints." if kept else
                     "No papers matched. You may retry once with different topic wording "
-                    "(same numeric constraints) or return NoMatch.")
+                    "(same numeric constraints) or call report_no_match.")
         if dropped:
             feedback += f" {dropped} results that violated the constraints were removed."
         return self._finish(record, {"feedback": feedback, "applied_filter": work_filter,

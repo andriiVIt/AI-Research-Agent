@@ -1,4 +1,4 @@
-"""The agent's three sequential tools. Each delegates to the trusted ResearchSession.
+"""The agent's five sequential tools. Each delegates to the trusted ResearchSession.
 
 search_papers takes flat scalar arguments: some providers (e.g. Groq-hosted Qwen) intermittently
 fail to generate nested-object tool arguments. Python assembles and validates Constraints.
