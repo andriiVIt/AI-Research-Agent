@@ -39,15 +39,17 @@ cp .env.example .env            # macOS/Linux
 Copy-Item .env.example .env     # Windows PowerShell
 ```
 
-Set `LLM_BASE_URL`, `LLM_MODEL` and `LLM_API_KEY` for an OpenAI-compatible Chat Completions provider with a tool-calling model, and `OPENALEX_API_KEY` (free at https://openalex.org/settings/api). The `.env` file in the working directory is loaded automatically; variables already set in your shell take precedence. Keep `.env.example` as the committed template and never commit `.env`.
+Set `LLM_BASE_URL`, `LLM_MODEL`, `CRITIC_MODEL` and `LLM_API_KEY` for an OpenAI-compatible Chat Completions provider with a tool-calling model, and `OPENALEX_API_KEY` (free at https://openalex.org/settings/api). The `.env` file in the working directory is loaded automatically; variables already set in your shell take precedence. Keep `.env.example` as the committed template and never commit `.env`.
 
 ## Usage
 
 ```bash
 python -m research.api.scout --demo --log demo_scout.jsonl                # offline, fixture data, no keys
 python -m research.api.scout "Find a paper about ..." --log scout.jsonl   # live
+python -m research.api.scout "Find a paper about ..." --no-reflection     # live, without the critic agent
 python -m unittest -v                                                     # offline tests (mocked model and APIs)
-python -m evals.evaluate_research --pause 60                              # live eval cases in evals/research_cases.py
+python -m evals.evaluate_research --pause 90                              # live eval cases in evals/research_cases.py
+python -m evals.evaluate_research --pause 90 --no-reflection              # baseline without the critic
 ```
 
 Example of a live answer (abridged):
@@ -91,7 +93,8 @@ Each step is done either by the LLM or by deterministic Python code:
 | 7 | Select the paper (`choose_paper`) or declare `report_no_match` | **LLM** proposes, **code** verifies (paper was returned and read, constraints hold) | `deps.py` `choose` |
 | 8 | Write the explanation: relevance, summary, or usefulness verdict | **LLM** | plain-text reply |
 | 9 | Validate the reply (sentence count, not just the title); ask the model to retry if it fails | **Code** | `agents/scout.py` `verify_answer` |
-| 10 | Render the final answer: title, authors, year, citations, citation source, link, checked constraints, uncertainty notes | **Code** | `agents/scout.py` `render` |
+| 10 | Reflection: a second LLM (the critic) checks every claim in the reply against the title, abstract and metadata, and whether it answers the request; flagged claims go back to the writer for one rewrite, which the critic reviews again | **LLM critic**, **code** decides and limits rounds | `agents/critic.py`, `verify_answer` |
+| 11 | Render the final answer: title, authors, year, citations, citation source, link, checked constraints, uncertainty notes (including what the critic still flagged) | **Code** | `agents/scout.py` `render` |
 
 **Structured output.** The constraints (`Constraints`, `Comparison`), the paper metadata (`Paper`), the citation evidence (`CitationEvidence`) and the final answer (`Recommendation` or `NoMatch`) are all Pydantic models (`src/research/schemas/paper.py`). The final `Recommendation` is assembled by Python from the verified `choose_paper` call and the model's prose. We do not ask the model to fill one large JSON object, because the tested model shortened long text inside tool-call or JSON fields (for example, it wrote only the paper title instead of a summary). Each run also writes a machine-readable JSONL trace with a `summary` record.
 
@@ -101,6 +104,11 @@ Each step is done either by the LLM or by deterministic Python code:
 - The model passes the constraints as flat `search_papers` arguments (`year_op`, `year`, `citations_op`, `citations`, `recent`). Python builds typed `Constraints` from them and turns those into OpenAlex filters (`>= 100` becomes `cited_by_count:>99`).
 - `ResearchSession` (`src/research/deps.py`) is the trusted boundary. It enforces a budget of 7 tool calls, 9 model turns and 120 s, keeps only papers that OpenAlex actually returned, removes results that violate a constraint, and refuses later searches that relax the numeric constraints. `choose_paper` rejects a paper that is unknown, unread, or violates a constraint.
 - An output validator checks the prose reply. It must have the requested sentence count (default 2-8) and must not just repeat the title. A rejected reply is retried up to twice.
+- **Reflection agent** (`src/research/agents/critic.py`). Once a reply passes the code checks, a second agent reviews it, in the style of FActScore. It lists every factual claim and labels it `supported`, `overstated` or `unsupported` against the title, abstract and metadata, with a fix for each problem. It also says whether the reply answers what the request asks. Its output is a typed `Critique` (`schemas/paper.py`). If it flags anything, `verify_answer` sends the specific claims and fixes back to the writer as a `ModelRetry`. The writer may rewrite once (`MAX_REVISIONS = 1`), and the critic reviews the rewrite too. Whatever the last review still flags is printed in the answer's *Uncertainty* line rather than hidden.
+  - The critic is told not to judge length or style, because code already checks the sentence count and two reviewers with different goals would contradict each other.
+  - It runs only after the cheap deterministic checks pass, never on a `no_match`.
+  - It fails open: if it is rate-limited or times out, the verified answer is kept and the trace records `skipped`.
+  - `CRITIC_MODEL` in `.env` picks its model and is required unless you pass `--no-reflection`. Using a different model avoids an LLM grading its own text, and on Groq's free tier it also has its own rate-limit budget. `--no-reflection` turns it off in the CLI and the evaluator, for before/after comparisons.
 - Python renders the final answer. Title, year, citation count, the OpenAlex API URL and retrieval date (plus Crossref's count when there is a DOI) come from source data. Only the explanation comes from the model.
 - If nothing qualifies, the agent returns `no_match` instead of inventing a paper.
 - Provider notes: one fresh retry on Groq's intermittent `tool_use_failed`, with the same session and budget. `LLM_MAX_TOKENS` (default 800) caps each reply, which keeps runs within the free tier's tokens-per-minute limit (see [LLM choice](#llm-choice)). Long prose is requested as the plain reply, never inside tool-call JSON, because the tested model filled such fields with just the paper title.
@@ -262,6 +270,37 @@ For every answered case, we compared each claim in the model's explanation with 
 
 The raw results of these runs, with full agent traces, are in [`evals/results/`](evals/results/). New runs write to `research_eval_results.jsonl` in the working directory, which is git-ignored.
 
+#### Run 4: with the reflection agent
+
+Run on 2026-11-21 with the writer `openai/gpt-oss-120b` and the critic `openai/gpt-oss-20b`, `--pause 90`, each case once ([`run4_reflection.jsonl`](evals/results/run4_reflection.jsonl)). The tables above describe the code without the critic, so the two runs are not a controlled comparison. OpenAlex results and the writer's drafts differ between runs.
+
+| ID | Status | Critic review 1 | Rewrite? | Critic review 2 | What the critic caught |
+|---|---|---|---|---|---|
+| R01 | answered ✅ | 1 problem | yes | passed | called an evaluation paper a "survey" |
+| R02 | answered ✅ | skipped (HTTP 400) | – | – | (missed: the final text still says the paper "demonstrates improved factual accuracy and provenance") |
+| R03 | answered ✅ | 3 problems | yes | passed | "millions of tool downloads" (the abstract says 177,436), and two claims that went beyond the abstract |
+| R04 | answered ✅ | 3 problems | yes | 1 problem | "has become a standard reference" (unsupported); review 2 flagged "over 1,900 citations" (1,963), which is a false positive |
+| R05–R07 | answered ✅ | passed | – | – | – |
+| R08, R13 | no_match ✅ | not run (no answer to review) | – | – | – |
+| R09 | answered, ❌ answer kind | 2 problems | yes | passed | "succeed on benchmarks but fail in real-world settings" (not in the abstract) |
+| R10, R12 | error ❌ | – | – | – | The writer hit HTTP 429 before replying (the same two long cases were rate-limited in run 1) |
+| R11 | answered ✅ | skipped (HTTP 400) | – | – | – |
+| R14 | answered, ❌ answer kind | 2 problems | yes | passed | "without explicit programming" (background knowledge, not in the abstract) |
+
+| Metric | Run 4 |
+|---|---|
+| Automatic checks passed | 10/14 (2 rate-limit errors, 2 wrong answer kinds) |
+| Constraint violations or invented facts | 0 |
+| Critic reviews completed / skipped | 13 / 2 (both skips: Groq `400 tool_use_failed`, in R02 and R11) |
+| First reviews that flagged a problem | 5 of the 8 reviewed answers. All 5 were rewritten, and 4 of 5 rewrites passed the second review |
+| Extra time per rewritten case | about 3–8 s (the median case took 4.5 s without a rewrite and 8.4 s with one) |
+
+What this shows:
+
+- **The critic finds the kind of error the code checks cannot.** It caught a number inflated from 177,436 to "millions", a paper mislabelled as a survey, and claims based on background knowledge. These are the same categories as the manual findings in runs 1–3.
+- **It is not reliable on its own.** It misses claims when its call fails (R02 kept the provenance distortion), and it sometimes flags accurate rounding (R04). It never caught a wrong answer kind (R09, R14), even though the prompt asks for that check. A likely cause is that the prompt shows it the writer's own `answer_kind`. The manual faithfulness check remains the ground truth.
+- **The `gpt-oss-20b` critic sometimes fails to produce its structured output.** With a 1,000-token cap, 9 of 12 reviews failed this way, because reasoning used up the budget. With 2,500 tokens, 2 of 15 still failed. Retrying the critic once on `tool_use_failed`, as the writer already does, is the obvious next step.
+
 #### Failure found in manual testing (outside the evaluation set)
 
 On 2026-11-19 we ran the R02 request by hand again: *"Find a paper about retrieval-augmented generation published before 2021 with more than 500 citations. Summarize its contribution in 5-7 sentences."* The full trace is in [`evals/results/manual_rag_before_2021.jsonl`](evals/results/manual_rag_before_2021.jsonl).
@@ -322,7 +361,7 @@ The model never hallucinated facts that the user sees as data, because none of t
 2. **Retry rate limits properly.** Honour `Retry-After` on HTTP 429 inside the agent, and add a token-aware delay to the evaluator, so free-tier runs are not lost.
 3. **Rank before choosing.** Fetch more candidates and let the model, or an embedding similarity score, rank them against the full request before choosing, so that "mobile devices" is not dropped from the topic.
 4. **Answer kind in Python.** Determine the answer kind from the request in code, as the sentence count already is, instead of trusting the model.
-5. **Check explanations automatically.** Use a FActScore-style claim check: split the explanation into claims and verify each against the abstract with a second, independent pass, and flag unsupported sentences.
+5. **Make the claim check more reliable.** The reflection agent (`agents/critic.py`, run 4) now checks each claim against the abstract with an independent model. Next steps: retry the critic on `tool_use_failed`, stop showing it the writer's `answer_kind` so it judges the request on its own, and grade it against the manual faithfulness labels to measure its precision and recall.
 6. **Measure reliability.** Run each case k times and report pass^k; the manual run above shows that a case can pass once and fail on a rerun. Also compare `openai/gpt-oss-20b` and other providers on the same set.
 
 ## Group member contributions
@@ -350,6 +389,7 @@ src/research/
   deps.py                   # ResearchSession: budget, trace, candidates, constraint oracle
   tools/search.py           # the agent's tools
   agents/scout.py           # instructions, output validator, run loop, rendering
+  agents/critic.py          # reflection agent: claim-by-claim critique of the explanation
   fixtures.py               # offline fixture data and scripted (non-LLM) model
   api/scout.py              # CLI
 tests/test_research.py      # offline tests

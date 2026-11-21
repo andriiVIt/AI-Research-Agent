@@ -41,7 +41,7 @@ def grade(case, summary, today):
     return checks
 
 
-async def evaluate(cases, output, pause=0.0):
+async def evaluate(cases, output, pause=0.0, reflection=True):
     today = date.today()
     rows = []
     for index, case in enumerate(cases):
@@ -49,17 +49,23 @@ async def evaluate(cases, output, pause=0.0):
             # Free-tier providers limit tokens per minute; back-to-back cases hit HTTP 429.
             await asyncio.sleep(pause)
         started = time.monotonic()
-        records = await run(case["request"])
+        records = await run(case["request"], reflection=reflection)
         summary = records[-1]
         checks = grade(case, summary, today)
+        reflection_info = summary["reflection"]
+        final_review = reflection_info["final_review"] or {}
         row = {"id": case["id"], "passed": all(checks.values()), "checks": checks,
                "status": summary["status"], "seconds": round(time.monotonic() - started, 1),
                "model_turns": summary["model_turns"], "tool_executions": summary["tool_executions"],
                "model_attempts": records[0]["attempts"],
+               # Reported, not graded: the critic is an LLM, so faithfulness stays a manual check.
+               "reviews": reflection_info["reviews"], "revisions": reflection_info["revisions"],
+               "final_review_passed": final_review.get("passed"),
                "paper": (summary.get("paper") or {}).get("title"), "records": records}
         rows.append(row)
         print(f"{case['id']} {'PASS' if row['passed'] else 'FAIL'} {summary['status']:<13} "
               f"{row['seconds']:>5}s turns={row['model_turns']} tools={row['tool_executions']} "
+              f"reviews={row['reviews']} rewrites={row['revisions']} "
               f"{ {k: v for k, v in checks.items() if not v} or ''} {row['paper'] or ''}")
     with output.open("w", encoding="utf-8") as handle:
         for row in rows:
@@ -74,9 +80,12 @@ def main():
     parser.add_argument("--output", default="research_eval_results.jsonl")
     parser.add_argument("--pause", type=float, default=0.0,
                         help="Seconds to wait between cases (e.g. 60 on a free tier)")
+    parser.add_argument("--no-reflection", action="store_true",
+                        help="Run without the reflection agent (baseline for comparison)")
     args = parser.parse_args()
     cases = [case for case in CASES if not args.only or case["id"] in args.only]
-    asyncio.run(evaluate(cases, Path(args.output), pause=args.pause))
+    asyncio.run(evaluate(cases, Path(args.output), pause=args.pause,
+                         reflection=not args.no_reflection))
 
 
 if __name__ == "__main__":

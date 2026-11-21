@@ -18,12 +18,17 @@ class Settings:
     temperature: float = 0.2
     timeout: float = 60.0
     openalex_api_key: str = field(default="", repr=False)
+    # The reflection agent's model (same provider and key). Empty here so the dataclass stays
+    # valid; require_critic_model() makes it mandatory for every run that uses reflection.
+    critic_model: str = ""
 
     @classmethod
     def load(cls, *, model=None, base_url=None, api_key=None, temperature=0.2, timeout=60.0,
-             openalex_api_key=None):
+             openalex_api_key=None, critic_model=None):
+        model = model or os.getenv("LLM_MODEL", "openai/gpt-oss-120b")
         settings = cls(
-            model=model or os.getenv("LLM_MODEL", "openai/gpt-oss-120b"),
+            model=model,
+            critic_model=critic_model or os.getenv("CRITIC_MODEL", ""),
             base_url=base_url or os.getenv("LLM_BASE_URL", "https://api.groq.com/openai/v1"),
             api_key=api_key if api_key is not None else os.getenv("LLM_API_KEY", ""),
             temperature=temperature,
@@ -48,3 +53,10 @@ class Settings:
         if not self.openalex_api_key:
             raise ValueError("Set OPENALEX_API_KEY before calling OpenAlex.")
         return self.openalex_api_key
+
+    def require_critic_model(self) -> str:
+        """Only runs with reflection need a critic model; --no-reflection works without it."""
+        if not self.critic_model:
+            raise ValueError("Set CRITIC_MODEL (e.g. openai/gpt-oss-20b), or run with "
+                             "--no-reflection.")
+        return self.critic_model

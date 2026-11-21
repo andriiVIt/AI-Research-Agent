@@ -45,6 +45,9 @@ class ResearchSession:
     sentence_range: tuple | None = None
     selection: dict | None = None
     no_match_reason: str | None = None
+    request: str = ""
+    critiques: list = field(default_factory=list)  
+    revisions: int = 0                              
 
     @property
     def today(self):

@@ -74,10 +74,16 @@ def fixture_transport(works=None, seen=None, crossref=None):
 
 
 def scripted_step(step, info):
-    """One step as a model response: (tool, args) is a tool call, ("text", str) a plain reply."""
+    """One step as a model response: (tool, args) is a tool call, ("text", str) a plain reply,
+    ("output", args) a structured final output (as the critic agent returns), and
+    ("raise", exception) a provider failure."""
     tool, args = step
+    if tool == "raise":
+        raise args
     if tool == "text":
         return ModelResponse(parts=[TextPart(args)])
+    if tool == "output":
+        return ModelResponse(parts=[ToolCallPart(info.output_tools[0].name, args)])
     return ModelResponse(parts=[ToolCallPart(tool, args)])
 
 
@@ -101,12 +107,35 @@ DEMO_STEPS = [
     ("get_paper", {"paper_id": "W900001"}),
     ("cross_check_citations", {"paper_id": "W900001"}),
     ("choose_paper", {"paper_id": "W900001", "answer_kind": "relevance"}),
+    # First draft: "state-of-the-art" is not in the fixture abstract, so the critic flags it.
     ("text", "The paper builds an LLM agent that edits repositories and runs tests through tools, "
-             "which is exactly the software engineering agent setting asked about. Its evaluation "
-             "on real GitHub issues gives evidence beyond toy tasks. This judgement is based on "
-             "the abstract only, and the data is a fixture."),
+             "which is exactly the software engineering agent setting asked about. It reaches "
+             "state-of-the-art results on real GitHub issues. This judgement is based on the "
+             "abstract only, and the data is a fixture."),
+    # Rewrite after the critique.
+    ("text", "The paper builds an LLM agent that edits repositories and runs tests through tools, "
+             "which is exactly the software engineering agent setting asked about. On a benchmark "
+             "of real GitHub issues it resolves more issues than retrieval-only baselines. This "
+             "judgement is based on the abstract only, and the data is a fixture."),
+]
+
+DEMO_CRITIC_STEPS = [
+    ("output", {"answers_the_request": True, "claims": [
+        {"claim": "The paper builds an LLM agent that edits repositories and runs tests through tools",
+         "status": "supported"},
+        {"claim": "It reaches state-of-the-art results on real GitHub issues", "status": "overstated",
+         "fix": "say it resolves more issues than retrieval-only baselines, as the abstract does"}]}),
+    ("output", {"answers_the_request": True, "claims": [
+        {"claim": "The paper builds an LLM agent that edits repositories and runs tests through tools",
+         "status": "supported"},
+        {"claim": "it resolves more issues than retrieval-only baselines", "status": "supported"}]}),
 ]
 
 
 def demo_model():
     return scripted_model(DEMO_STEPS, name="scripted-offline-demo")
+
+
+def demo_critic_model():
+    """A scripted reflection agent: flags one overstated claim, then passes the rewrite."""
+    return scripted_model(DEMO_CRITIC_STEPS, name="scripted-offline-critic")

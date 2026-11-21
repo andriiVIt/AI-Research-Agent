@@ -106,6 +106,36 @@ class NoMatch(BaseModel):
     reason: str
 
 
+class ClaimCheck(BaseModel):
+    """One factual claim from the explanation, judged against the title, abstract and metadata."""
+    claim: str = Field(description="One factual claim from the explanation, quoted or closely "
+                                   "paraphrased.")
+    status: Literal["supported", "overstated", "unsupported"] = Field(description=(
+        "supported: the source states it; overstated: the source says something weaker; "
+        "unsupported: not in the source, even if true in general."))
+    fix: str | None = Field(default=None, description=(
+        "For a claim that is not supported: how to reword it so the source supports it, or "
+        "'remove'. Null for supported claims."))
+
+
+class Critique(BaseModel):
+    """The reflection agent's review of the writer's explanation (claims and request fit only)."""
+    claims: list[ClaimCheck] = Field(description="Every factual claim in the explanation.")
+    answers_the_request: bool = Field(description=(
+        "True when the explanation gives what the request asks for: why the paper is relevant, "
+        "a summary of its contribution, or whether it would be useful."))
+    request_feedback: str | None = Field(default=None, description=(
+        "When answers_the_request is false: one sentence on what the request asks for instead."))
+
+    @property
+    def problems(self) -> list[str]:
+        found = [f'"{c.claim}" is {c.status}: {c.fix or "remove it"}'
+                 for c in self.claims if c.status != "supported"]
+        if not self.answers_the_request:
+            found.append(self.request_feedback or "the reply does not answer what the request asks")
+        return found
+
+
 SENTENCE_RANGE = re.compile(r"(\d+)\s*(?:-|–|—|to)\s*(\d+)\s+sentences?", re.I)
 SENTENCE_EXACT = re.compile(r"\b(?:in|with|using)?\s*(\d+)\s+sentences?", re.I)
 SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+(?=[A-Z0-9\"'(])")
