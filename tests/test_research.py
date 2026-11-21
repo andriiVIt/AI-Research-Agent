@@ -12,6 +12,7 @@ from pydantic_ai.exceptions import ModelHTTPError  # noqa: E402
 from pydantic_ai.models.function import FunctionModel  # noqa: E402
 
 from research.agents.scout import execute, run  # noqa: E402
+from research.config import Settings  # noqa: E402
 from research.deps import BudgetReached, ResearchSession  # noqa: E402
 from research.fixtures import (FIXTURE_WORKS, fixture_transport, fixture_work,  # noqa: E402
                                scripted_model, scripted_step)
@@ -300,6 +301,109 @@ class TestAgent(unittest.TestCase):
         self.assertEqual([r["tool"] for r in records if r["event"] == "tool"],
                          ["search_papers", "get_paper", "cross_check_citations", "choose_paper"])
         self.assertEqual(records[-1]["status"], "answered")
+        self.assertEqual([r["passed"] for r in records if r["event"] == "critique"], [False, True])
+        self.assertEqual(records[-1]["reflection"]["revisions"], 1)
+
+    def test_demo_without_reflection_keeps_first_draft(self):
+        records = asyncio.run(run(demo=True, reflection=False))
+        self.assertFalse([r for r in records if r["event"] == "critique"])
+        self.assertIn("state-of-the-art", records[-1]["answer"]["explanation"])
+        self.assertFalse(records[-1]["reflection"]["enabled"])
+
+
+SUPPORTED = {"claim": "It studies tool-using LLM agents that repair code", "status": "supported"}
+OVERSTATED = {"claim": "It is the best repair agent", "status": "overstated",
+              "fix": "say it resolves more issues than retrieval-only baselines"}
+REWRITE = ("It studies tool-using LLM agents that repair code in repositories. "
+           "It resolves more issues than retrieval-only baselines.")
+
+
+def critique(*claims, answers=True, feedback=None):
+    return ("output", {"claims": list(claims), "answers_the_request": answers,
+                       "request_feedback": feedback})
+
+
+def run_with_critic(steps, critic_steps, request=AGENTS_REQUEST):
+    writer, critic = scripted_model(steps), scripted_model(critic_steps)
+    async def go():
+        session = make_session()
+        summary = await execute(writer, session, request, critic_model=critic)
+        return session, summary
+    session, summary = asyncio.run(go())
+    return session, summary, writer, critic
+
+
+class TestReflection(unittest.TestCase):
+    def test_flagged_claim_is_rewritten_and_rechecked(self):
+        session, summary, writer, critic = run_with_critic(
+            [SEARCH_AFTER_2022, READ_A, choose(), reply(), reply(REWRITE)],
+            [critique(SUPPORTED, OVERSTATED), critique(SUPPORTED)])
+        self.assertEqual(summary["status"], "answered")
+        self.assertEqual(summary["answer"]["explanation"], REWRITE)
+        self.assertEqual(summary["reflection"]["reviews"], 2)
+        self.assertEqual(summary["reflection"]["revisions"], 1)
+        self.assertTrue(summary["reflection"]["final_review"]["passed"])
+        # The writer saw the reviewer's specific claim and fix.
+        self.assertIn("It is the best repair agent", writer.seen_prompts[-1])
+        self.assertIn("retrieval-only baselines", writer.seen_prompts[-1])
+        # The critic saw the request, the abstract and the draft, but not instructions to obey.
+        self.assertIn("We present an agent", critic.seen_prompts[0])
+        self.assertIn(AGENTS_REQUEST, critic.seen_prompts[0])
+        self.assertIn("after 1 rewrite and found no unsupported claims", summary["rendered"])
+        self.assertEqual([r["event"] for r in session.trace][-2:], ["critique", "critique"])
+
+    def test_only_one_rewrite_then_remaining_problems_are_reported(self):
+        _, summary, _, _ = run_with_critic(
+            [SEARCH_AFTER_2022, READ_A, choose(), reply(), reply(REWRITE)],
+            [critique(OVERSTATED), critique(OVERSTATED)])
+        self.assertEqual(summary["status"], "answered")
+        self.assertEqual(summary["reflection"]["revisions"], 1)
+        self.assertFalse(summary["reflection"]["final_review"]["passed"])
+        self.assertIn("A reviewer model still flagged after 1 rewrite", summary["rendered"])
+        self.assertIn("It is the best repair agent", summary["rendered"])
+
+    def test_wrong_answer_kind_feedback_reaches_writer(self):
+        _, summary, writer, _ = run_with_critic(
+            [SEARCH_AFTER_2022, READ_A, choose(kind="summary"), reply(), choose(), reply(REWRITE)],
+            [critique(SUPPORTED, answers=False, feedback="The request asks why it is relevant."),
+             critique(SUPPORTED)])
+        self.assertIn("asks why it is relevant", writer.seen_prompts[4])
+        self.assertEqual(summary["answer"]["answer_kind"], "relevance")
+        self.assertEqual(summary["status"], "answered")
+
+    def test_failed_critic_does_not_fail_the_answer(self):
+        _, summary, _, _ = run_with_critic(
+            [SEARCH_AFTER_2022, READ_A, choose(), reply()],
+            [("raise", ModelHTTPError(429, "mock", {"code": "rate_limited"}))])
+        self.assertEqual(summary["status"], "answered")
+        self.assertEqual(summary["answer"]["explanation"], REPLY)
+        self.assertEqual(summary["reflection"]["final_review"]["skipped"], "ModelHTTPError 429")
+        self.assertIn("automatic claim review was skipped", summary["rendered"])
+
+    def test_code_checks_run_before_the_critic(self):
+        title = FIXTURE_WORKS[0]["display_name"]
+        _, summary, _, critic = run_with_critic(
+            [SEARCH_AFTER_2022, READ_A, choose(), reply(title), reply()], [critique(SUPPORTED)])
+        self.assertEqual(summary["status"], "answered")
+        self.assertEqual(len(critic.seen_prompts), 1)  # the title-only reply never reached it
+
+    def test_live_reflection_requires_a_critic_model(self):
+        settings = Settings(model="m", base_url="https://example.org/v1", api_key="k",
+                            openalex_api_key="o")
+        with self.assertRaises(ValueError) as error:
+            asyncio.run(run("Find a paper about agents.", settings=settings))
+        self.assertIn("CRITIC_MODEL", str(error.exception))
+        self.assertEqual(Settings(model="m", base_url="u", api_key="k",
+                                  critic_model="c").require_critic_model(), "c")
+
+    def test_no_match_is_not_reviewed(self):
+        _, summary, _, critic = run_with_critic(
+            [search(year=(">", 2025), citations=(">", 100000)),
+             ("report_no_match", {"reason": "Nothing qualifies."}), reply("Nothing qualifies.")],
+            [critique(SUPPORTED)])
+        self.assertEqual(summary["status"], "no_match")
+        self.assertEqual(critic.seen_prompts, [])
+        self.assertEqual(summary["reflection"]["reviews"], 0)
 
 
 if __name__ == "__main__":

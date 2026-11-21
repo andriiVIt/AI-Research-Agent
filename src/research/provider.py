@@ -13,7 +13,8 @@ FRAMEWORK_VERSION = version("pydantic-ai-slim")
 
 
 @asynccontextmanager
-async def open_model(settings, metrics, *, response_mode="json"):
+async def open_model(settings, metrics, *, response_mode="json", model_name=None):
+    """model_name overrides settings.model (used to open a separate critic model)."""
     async def count_request(request):
         metrics["attempts"] += 1
 
@@ -36,5 +37,5 @@ async def open_model(settings, metrics, *, response_mode="json"):
             profile = OpenAIModelProfile(supports_json_object_output=response_mode == "json",
                                          supports_json_schema_output=True,
                                          supports_tools=True)
-            yield OpenAIChatModel(settings.model, provider=OpenAIProvider(openai_client=client),
+            yield OpenAIChatModel(model_name or settings.model, provider=OpenAIProvider(openai_client=client),
                                   profile=profile)

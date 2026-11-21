@@ -4,11 +4,14 @@ The model parses constraints (as search_papers arguments), picks a paper with ch
 writes the explanation as its plain-text reply. Python fetches every fact, re-checks every
 constraint, and renders the citation evidence. Long prose is never requested inside tool-call
 JSON: smaller models reliably shorten it there (observed: the title instead of a summary).
+Optionally, a reflection agent (agents/critic.py) critiques the explanation against the abstract
+and the writer rewrites it once.
 """
 import asyncio
 import os
 import re
 import time
+from contextlib import AsyncExitStack
 from datetime import date
 
 import httpx2
@@ -17,10 +20,11 @@ from pydantic_ai.exceptions import ModelHTTPError, UnexpectedModelBehavior, Usag
 from pydantic_ai.messages import ModelResponse, ToolCallPart
 from pydantic_ai.usage import UsageLimits
 
+from research.agents.critic import build_critic, review
 from research.provider import FRAMEWORK_VERSION, open_model
 from research.config import Settings
 from research.deps import BudgetReached, ResearchSession
-from research.fixtures import DEMO_REQUEST, demo_model, fixture_transport
+from research.fixtures import DEMO_REQUEST, demo_critic_model, demo_model, fixture_transport
 from research.schemas import NoMatch, Recommendation, count_sentences, requested_sentences
 from research.services.crossref import CrossrefClient
 from research.services.openalex import OpenAlexClient
@@ -29,6 +33,8 @@ from research.tools.search import register_tools
 TOOL_LIMIT = 7
 REQUEST_LIMIT = 9
 PROVIDER_ATTEMPTS = 2  # one fresh retry when the provider fails to generate a tool call
+OUTPUT_RETRIES = 2     # rejections of the final reply by Python's own checks
+MAX_REVISIONS = 1      # rewrites the reflection agent may ask for (each costs a critic + writer call)
 DEFAULT_SENTENCES = (2, 8)
 # Caps each reply so a run stays within the provider's free-tier tokens-per-minute limit.
 MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "800"))
@@ -60,15 +66,17 @@ def sentence_target(session):
     return f"exactly {low}" if low == high else f"{low}-{high}"
 
 
-def build_agent(model, *, temperature=0.2):
+def build_agent(model, *, critic_model=None, temperature=0.2):
+    critic = build_critic(critic_model) if critic_model is not None else None
+    output_retries = OUTPUT_RETRIES + (MAX_REVISIONS if critic else 0)
     agent = Agent(model, deps_type=ResearchSession, output_type=str,
-                  instructions=INSTRUCTIONS, retries=2,
+                  instructions=INSTRUCTIONS, retries={"tools": 2, "output": output_retries},
                   model_settings={"temperature": temperature, "max_tokens": MAX_TOKENS,
                                   "parallel_tool_calls": False})
     register_tools(agent, sentence_target)
 
     @agent.output_validator
-    def verify_answer(ctx: RunContext[ResearchSession], text: str) -> str:
+    async def verify_answer(ctx: RunContext[ResearchSession], text: str) -> str:
         session = ctx.deps
         text = text.strip()
         if session.no_match_reason is not None:
@@ -87,7 +95,22 @@ def build_agent(model, *, temperature=0.2):
         if problems:
             raise ModelRetry("Reply rejected by Python checks: " + "; ".join(problems)
                              + ". Reply again with prose sentences only.")
-        return text
+        if critic is None:
+            return text
+        # Reflection: only replies that already pass the cheap deterministic checks are reviewed.
+        critique, record = await review(critic, session, text)
+        session.critiques.append(record)
+        session.trace.append(record)
+        if critique is None or not critique.problems or session.revisions >= MAX_REVISIONS:
+            return text  # passed, review skipped, or out of rewrites (render reports what is left)
+        session.revisions += 1
+        record["revision_requested"] = True
+        kind_hint = ("" if critique.answers_the_request else
+                     " Call choose_paper again with the answer_kind the request asks for, then reply.")
+        raise ModelRetry("A reviewer checked your reply against the paper's title and abstract and "
+                         "found: " + "; ".join(p.rstrip(". ") for p in critique.problems)
+                         + f". Rewrite the reply with {sentence_target(session)} prose sentences, "
+                         "keeping only claims the title and abstract support." + kind_hint)
 
     return agent
 
@@ -133,8 +156,25 @@ def render(session: ResearchSession, output):
     heading = {"relevance": "Why it is relevant:", "summary": "Summary:",
                "usefulness": f"Usefulness verdict: {output.verdict}."}
     lines += ["", heading[output.answer_kind], output.explanation]
-    lines += ["", "Uncertainty: " + " ".join(uncertainty_notes(paper, evidence))]
+    lines += ["", "Uncertainty: " + " ".join(uncertainty_notes(paper, evidence)
+                                              + reflection_notes(session.critiques))]
     return "\n".join(lines)
+
+
+def reflection_notes(critiques):
+    """What the reflection agent concluded about the final explanation, stated honestly."""
+    if not critiques:
+        return []
+    last = critiques[-1]
+    if "skipped" in last:
+        return [f"The automatic claim review was skipped ({last['skipped']})."]
+    revised = sum(1 for record in critiques if record.get("revision_requested"))
+    rewrites = f" after {revised} rewrite" + ("s" if revised != 1 else "") if revised else ""
+    if last["passed"]:
+        return [f"A reviewer model checked each claim against the abstract{rewrites} and found "
+                "no unsupported claims (the reviewer is itself an LLM and can miss errors)."]
+    return [f"A reviewer model still flagged{rewrites}: "
+            + "; ".join(problem.rstrip(". ") for problem in last["problems"]) + "."]
 
 
 def uncertainty_notes(paper, evidence):
@@ -165,10 +205,11 @@ def transcript_of(messages):
     return turns, transcript
 
 
-async def execute(model, session: ResearchSession, request: str, *, temperature=0.2, timeout=120,
-                  request_limit=REQUEST_LIMIT):
+async def execute(model, session: ResearchSession, request: str, *, critic_model=None,
+                  temperature=0.2, timeout=120, request_limit=REQUEST_LIMIT):
+    session.request = request
     session.sentence_range = requested_sentences(request)
-    agent = build_agent(model, temperature=temperature)
+    agent = build_agent(model, critic_model=critic_model, temperature=temperature)
     status, output, rendered = "incomplete", None, "The agent stopped without an answer."
     provider_retries, all_messages = 0, []
     try:
@@ -208,6 +249,9 @@ async def execute(model, session: ResearchSession, request: str, *, temperature=
                "answer": output.model_dump() if output is not None else None,
                "model_turns": turns, "tool_executions": session.calls,
                "provider_retries": provider_retries,
+               "reflection": {"enabled": critic_model is not None,
+                              "reviews": len(session.critiques), "revisions": session.revisions,
+                              "final_review": session.critiques[-1] if session.critiques else None},
                "model_transcript": transcript}
     if isinstance(output, Recommendation):
         paper = session.candidates[output.paper_id]
@@ -220,30 +264,42 @@ async def execute(model, session: ResearchSession, request: str, *, temperature=
 
 
 async def run(request: str | None = None, *, demo=False, settings=None, today: date | None = None,
-              timeout=120, request_limit=REQUEST_LIMIT):
-    """Run one request end to end. Returns JSONL records: run, tool calls, summary."""
+              timeout=120, request_limit=REQUEST_LIMIT, reflection=True):
+    """Run one request end to end. Returns JSONL records: run, tool calls, critiques, summary.
+    reflection=False skips the critic agent (used to compare runs with and without it)."""
     timeout = min(timeout, 120)
     request = DEMO_REQUEST if demo else request
     if not request:
         raise ValueError("Give a research request, or use --demo.")
     metrics = {"attempts": 0, "framework_version": FRAMEWORK_VERSION,
-               "mode": "scripted_offline" if demo else "live"}
+               "mode": "scripted_offline" if demo else "live", "reflection": reflection}
     transport = fixture_transport() if demo else None
     if not demo:
         settings = settings or Settings.load(timeout=30)
         openalex_key = settings.require_openalex_key()
+        critic_name = settings.require_critic_model() if reflection else None
     async with httpx2.AsyncClient(timeout=20, transport=transport) as http:
         openalex = OpenAlexClient(http, "" if demo else openalex_key,
                                   today=date(2026, 11, 16) if demo else today)
         session = ResearchSession(openalex=openalex, crossref=CrossrefClient(http),
                                   tool_limit=TOOL_LIMIT, deadline=time.monotonic() + timeout)
         if demo:
-            summary = await execute(demo_model(), session, request, timeout=timeout,
-                                    request_limit=request_limit)
+            summary = await execute(demo_model(), session, request,
+                                    critic_model=demo_critic_model() if reflection else None,
+                                    timeout=timeout, request_limit=request_limit)
         else:
-            async with open_model(settings, metrics, response_mode="plain") as model:
-                summary = await execute(model, session, request, temperature=settings.temperature,
-                                        timeout=timeout, request_limit=request_limit)
+            async with AsyncExitStack() as stack:
+                model = await stack.enter_async_context(
+                    open_model(settings, metrics, response_mode="plain"))
+                critic_model = None
+                if reflection:
+                    metrics["critic_model"] = critic_name
+                    critic_model = model if critic_name == settings.model else (
+                        await stack.enter_async_context(open_model(
+                            settings, metrics, response_mode="plain", model_name=critic_name)))
+                summary = await execute(model, session, request, critic_model=critic_model,
+                                        temperature=settings.temperature, timeout=timeout,
+                                        request_limit=request_limit)
     metrics.pop("raw_content", None)
     return [{"event": "run", **metrics, "request": request,
              "limits": {"model_turns": request_limit, "tool_executions": TOOL_LIMIT,
