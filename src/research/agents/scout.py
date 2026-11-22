@@ -69,7 +69,7 @@ def sentence_target(session):
 def build_agent(model, *, critic_model=None, temperature=0.2):
     critic = build_critic(critic_model) if critic_model is not None else None
     output_retries = OUTPUT_RETRIES + (MAX_REVISIONS if critic else 0)
-    agent = Agent(model, deps_type=ResearchSession, output_type=str,
+    agent = Agent(model, deps_type=ResearchSession, output_type=str,instrument=True,
                   instructions=INSTRUCTIONS, retries={"tools": 2, "output": output_retries},
                   model_settings={"temperature": temperature, "max_tokens": MAX_TOKENS,
                                   "parallel_tool_calls": False})

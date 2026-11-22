@@ -93,10 +93,20 @@ class OpenAlexClient:
     async def search(self, constraints: Constraints, per_page: int = 8):
         """Return (papers, filter string). The filter is safe to log; the key is not part of it."""
         work_filter = build_filter(constraints, self.today)
-        payload = await self._get("/works", {"search": constraints.topic, "filter": work_filter,
-                                             "per_page": per_page, "select": SELECT})
+        broad = not constraints.recent and constraints.citations is None and constraints.year is None
+        params = {"search": constraints.topic, "filter": work_filter,
+                  "per_page": 15 if broad else per_page, "select": SELECT}
+        if constraints.recent:
+            params["sort"] = "publication_date:desc"
+        # Broad searches: let OpenAlex rank by relevance first, then sort client-side by citations.
+        # Applying cited_by_count:desc at the API level pulls in highly cited papers that only
+        # mention the topic in passing; relevance ranking keeps results topically grounded.
+        payload = await self._get("/works", params)
         retrieved = self.today.isoformat()
-        return [parse_work(work, retrieved) for work in payload.get("results", [])], work_filter
+        papers = [parse_work(work, retrieved) for work in payload.get("results", [])]
+        if broad:
+            papers.sort(key=lambda p: p.cited_by_count, reverse=True)
+        return papers, work_filter
 
     async def get(self, openalex_id: str) -> Paper:
         payload = await self._get(f"/works/{openalex_id}", {"select": SELECT})

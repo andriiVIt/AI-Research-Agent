@@ -76,6 +76,8 @@ class ResearchSession:
         return self._finish(record, {"feedback": feedback}, accepted=False)
 
     async def search(self, constraints: Constraints):
+        print("TOPIC:", constraints.topic)
+        print("FULL CONSTRAINTS:", constraints.model_dump())
         record = self.begin_call("search_papers", constraints.model_dump())
         if self.constraints is not None and constraints.numeric_key() != self.constraints.numeric_key():
             return self._finish(record, {"feedback": (
