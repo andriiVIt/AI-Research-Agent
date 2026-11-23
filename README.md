@@ -398,13 +398,11 @@ The model never hallucinated facts that the user sees as data, because none of t
 
 ## Group member contributions
 
-<!-- TODO: replace with real names and contributions before submission. Every member must also have meaningful commits. -->
-
 | Member | GitHub | Contributions |
 |---|---|---|
-| Andrii Savchenko | @andriiVIt | TODO |
-| TODO | TODO | TODO |
-| TODO | TODO | TODO |
+| Andrii Savchenko | @andriiVIt | Initial agent: OpenAlex search and Crossref cross-check services, typed constraints and schemas, the `ResearchSession` trust boundary (budget, trace, constraint oracle), the agent tools, output validation and rendering, deterministic uncertainty notes, CLI, `.env` configuration, Docker image, offline test suite; live evaluation set, runs and results; most of this README (setup, workflow, LLM choice, evaluation, reflection) |
+| Ionut Andrei Grosu | @grosuionutandrei | Reflection agent (`agents/critic.py`): a second LLM that checks every claim in the answer against the abstract and sends flagged claims back for one rewrite; broad-search ranking (15 relevance-ranked results re-sorted by citation count) and fewer topic retries on broad requests |
+| Ju5tAmir | @Ju5tAmir | Comparison mode (`--top N`): numbered shortlist of verified papers, a check that the comparison mentions every shortlisted paper, critic review per paper, CLI option and offline demo, tests and README section; fixed the failing test suite (unsupported `instrument=True`), removed debug output, added tests for citation sorting |
 
 ## Layout
 
