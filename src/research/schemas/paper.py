@@ -106,7 +106,6 @@ class NoMatch(BaseModel):
     reason: str
 
 
-
 class ClaimCheck(BaseModel):
     """One factual claim from the explanation, judged against the title, abstract and metadata."""
     claim: str = Field(description="One factual claim from the explanation, quoted or closely "

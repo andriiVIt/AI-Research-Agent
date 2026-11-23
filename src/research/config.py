@@ -14,7 +14,7 @@ load_dotenv(find_dotenv(usecwd=True), override=False)
 class Settings:
     model: str
     base_url: str
-    api_key: str = field(repr=False)                    
+    api_key: str = field(repr=False)
     temperature: float = 0.2
     timeout: float = 60.0
     openalex_api_key: str = field(default="", repr=False)
