@@ -132,8 +132,45 @@ DEMO_CRITIC_STEPS = [
 ]
 
 
+DEMO_COMPARE_REQUEST = ("Find two papers about LLM agents for software engineering published after "
+                        "2022 and compare whether they would be useful for someone building a "
+                        "coding agent.")
+
+DEMO_COMPARE_STEPS = [
+    ("search_papers", {"topic": "LLM agents for software engineering", "year_op": ">",
+                       "year": 2022}),
+    ("get_paper", {"paper_id": "W900001"}),
+    ("get_paper", {"paper_id": "W900003"}),
+    ("choose_paper", {"paper_id": "W900001", "answer_kind": "usefulness", "verdict": "useful"}),
+    ("choose_paper", {"paper_id": "W900003", "answer_kind": "usefulness",
+                      "verdict": "partly useful"}),
+    ("text", "Paper 1 builds an LLM agent that edits repositories and runs tests through tools, "
+             "which is the core of a coding agent. On real GitHub issues it resolves more issues "
+             "than retrieval-only baselines. Paper 2 is a survey of developers using coding "
+             "assistants, so it informs what users expect but offers no agent design. Paper 1 is "
+             "the more useful starting point; the data is a fixture."),
+]
+
+DEMO_COMPARE_CRITIC_STEPS = [
+    ("output", {"answers_the_request": True, "claims": [
+        {"claim": "Paper 1 builds an LLM agent that edits repositories and runs tests through tools",
+         "status": "supported"},
+        {"claim": "it resolves more issues than retrieval-only baselines", "status": "supported"},
+        {"claim": "Paper 2 is a survey of developers using coding assistants",
+         "status": "supported"}]}),
+]
+
+
 def demo_model():
     return scripted_model(DEMO_STEPS, name="scripted-offline-demo")
+
+
+def demo_compare_model():
+    return scripted_model(DEMO_COMPARE_STEPS, name="scripted-offline-compare-demo")
+
+
+def demo_compare_critic_model():
+    return scripted_model(DEMO_COMPARE_CRITIC_STEPS, name="scripted-offline-critic")
 
 
 def demo_critic_model():

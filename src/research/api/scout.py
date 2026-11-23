@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 
 os.environ.setdefault("PYDANTIC_AI_NO_BANNER", "1")
-from research.agents.scout import run  # noqa: E402
+from research.agents.scout import MAX_TOP, run  # noqa: E402
 
 
 def main():
@@ -24,6 +24,9 @@ def main():
     parser.add_argument("--log", default="scout_trace.jsonl")
     parser.add_argument("--no-reflection", action="store_true",
                         help="Skip the reflection agent that critiques the explanation")
+    parser.add_argument("--top", type=int, default=1, metavar="N",
+                        help="Shortlist and compare N papers instead of recommending one "
+                             f"(1-{MAX_TOP}; with --demo, runs the comparison demo)")
     args = parser.parse_args()
     if args.demo and args.request:
         parser.error("--demo uses a fixed request; omit the request text.")
@@ -33,7 +36,8 @@ def main():
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     try:
-        records = asyncio.run(run(args.request, demo=args.demo, reflection=not args.no_reflection))
+        records = asyncio.run(run(args.request, demo=args.demo, reflection=not args.no_reflection,
+                                  top=args.top))
     except ValueError as error:
         parser.exit(2, str(error) + "\n")
     path.write_text("".join(json.dumps(record, ensure_ascii=False) + "\n" for record in records),

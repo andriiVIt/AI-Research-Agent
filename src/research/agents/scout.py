@@ -25,7 +25,9 @@ from research.agents.critic import build_critic, review
 from research.provider import FRAMEWORK_VERSION, open_model
 from research.config import Settings
 from research.deps import BudgetReached, ResearchSession
-from research.fixtures import DEMO_REQUEST, demo_critic_model, demo_model, fixture_transport
+from research.fixtures import (DEMO_COMPARE_REQUEST, DEMO_REQUEST, demo_compare_critic_model,
+                               demo_compare_model, demo_critic_model, demo_model,
+                               fixture_transport)
 from research.schemas import (NoMatch, Pick, Recommendation, Shortlist, count_sentences,
                               requested_sentences)
 from research.services.crossref import CrossrefClient
@@ -253,7 +255,8 @@ def render_shortlist(session: ResearchSession, output: Shortlist):
                "usefulness": "Usefulness comparison:"}
     lines += ["", heading[output.answer_kind], output.explanation]
     lines += ["", "Uncertainty: " + " ".join(shortlist_notes(session, output)
-                                              + reflection_notes(session.critiques))]
+                                              + reflection_notes(session.critiques,
+                                                                 "the abstracts"))]
     return "\n".join(lines)
 
 
@@ -278,7 +281,7 @@ def shortlist_notes(session: ResearchSession, output: Shortlist):
     return notes
 
 
-def reflection_notes(critiques):
+def reflection_notes(critiques, sources="the abstract"):
     """What the reflection agent concluded about the final explanation, stated honestly."""
     if not critiques:
         return []
@@ -288,7 +291,7 @@ def reflection_notes(critiques):
     revised = sum(1 for record in critiques if record.get("revision_requested"))
     rewrites = f" after {revised} rewrite" + ("s" if revised != 1 else "") if revised else ""
     if last["passed"]:
-        return [f"A reviewer model checked each claim against the abstract{rewrites} and found "
+        return [f"A reviewer model checked each claim against {sources}{rewrites} and found "
                 "no unsupported claims (the reviewer is itself an LLM and can miss errors)."]
     return [f"A reviewer model still flagged{rewrites}: "
             + "; ".join(problem.rstrip(". ") for problem in last["problems"]) + "."]
@@ -392,15 +395,21 @@ async def execute(model, session: ResearchSession, request: str, *, critic_model
 
 
 async def run(request: str | None = None, *, demo=False, settings=None, today: date | None = None,
-              timeout=120, request_limit=REQUEST_LIMIT, reflection=True):
+              timeout=120, request_limit=REQUEST_LIMIT, reflection=True, top=1):
     """Run one request end to end. Returns JSONL records: run, tool calls, critiques, summary.
-    reflection=False skips the critic agent (used to compare runs with and without it)."""
+    reflection=False skips the critic agent (used to compare runs with and without it).
+    top > 1 shortlists and compares that many papers (comparison mode)."""
+    if not 1 <= top <= MAX_TOP:
+        raise ValueError(f"Choose --top between 1 and {MAX_TOP}.")
     timeout = min(timeout, 120)
-    request = DEMO_REQUEST if demo else request
+    if demo:
+        request = DEMO_REQUEST if top == 1 else DEMO_COMPARE_REQUEST
     if not request:
         raise ValueError("Give a research request, or use --demo.")
+    tool_limit, request_limit = tool_limit_for(top), request_limit_for(top, request_limit)
     metrics = {"attempts": 0, "framework_version": FRAMEWORK_VERSION,
-               "mode": "scripted_offline" if demo else "live", "reflection": reflection}
+               "mode": "scripted_offline" if demo else "live", "reflection": reflection,
+               "top": top}
     transport = fixture_transport() if demo else None
     if not demo:
         settings = settings or Settings.load(timeout=30)
@@ -410,10 +419,13 @@ async def run(request: str | None = None, *, demo=False, settings=None, today: d
         openalex = OpenAlexClient(http, "" if demo else openalex_key,
                                   today=date(2026, 11, 16) if demo else today)
         session = ResearchSession(openalex=openalex, crossref=CrossrefClient(http),
-                                  tool_limit=TOOL_LIMIT, deadline=time.monotonic() + timeout)
+                                  tool_limit=tool_limit, deadline=time.monotonic() + timeout,
+                                  top=top)
         if demo:
-            summary = await execute(demo_model(), session, request,
-                                    critic_model=demo_critic_model() if reflection else None,
+            writer, critic = ((demo_model(), demo_critic_model) if top == 1 else
+                              (demo_compare_model(), demo_compare_critic_model))
+            summary = await execute(writer, session, request,
+                                    critic_model=critic() if reflection else None,
                                     timeout=timeout, request_limit=request_limit)
         else:
             async with AsyncExitStack() as stack:
@@ -430,5 +442,5 @@ async def run(request: str | None = None, *, demo=False, settings=None, today: d
                                         request_limit=request_limit)
     metrics.pop("raw_content", None)
     return [{"event": "run", **metrics, "request": request,
-             "limits": {"model_turns": request_limit, "tool_executions": TOOL_LIMIT,
+             "limits": {"model_turns": request_limit, "tool_executions": tool_limit,
                         "seconds": timeout}}, *session.trace, summary]

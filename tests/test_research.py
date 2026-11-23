@@ -492,6 +492,23 @@ class TestComparison(unittest.TestCase):
         self.assertEqual(reviews[0]["paper_ids"], ["W900001", "W900003"])
         self.assertIn("after 1 rewrite and found no unsupported claims", summary["rendered"])
 
+    def test_comparison_demo_runs_offline(self):
+        records = asyncio.run(run(demo=True, top=2))
+        self.assertEqual(records[0]["top"], 2)
+        self.assertEqual(records[0]["limits"]["tool_executions"], 10)
+        self.assertEqual([r["tool"] for r in records if r["event"] == "tool"],
+                         ["search_papers", "get_paper", "get_paper", "choose_paper", "choose_paper"])
+        summary = records[-1]
+        self.assertEqual(summary["status"], "answered")
+        self.assertEqual([p["verdict"] for p in summary["answer"]["picks"]],
+                         ["useful", "partly useful"])
+        self.assertIn("checked each claim against the abstracts", summary["rendered"])
+
+    def test_top_outside_the_allowed_range_is_refused(self):
+        for top in (0, 4):
+            with self.assertRaises(ValueError):
+                asyncio.run(run(demo=True, top=top))
+
     def test_budget_grows_with_the_number_of_papers(self):
         self.assertEqual(tool_limit_for(1), 7)
         self.assertEqual(tool_limit_for(3), 13)
