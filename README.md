@@ -47,6 +47,8 @@ Set `LLM_BASE_URL`, `LLM_MODEL`, `CRITIC_MODEL` and `LLM_API_KEY` for an OpenAI-
 python -m research.api.scout --demo --log demo_scout.jsonl                # offline, fixture data, no keys
 python -m research.api.scout "Find a paper about ..." --log scout.jsonl   # live
 python -m research.api.scout "Find a paper about ..." --no-reflection     # live, without the critic agent
+python -m research.api.scout "Find papers about ..." --top 3              # live, compare 3 papers
+python -m research.api.scout --demo --top 2 --log demo_compare.jsonl      # offline comparison demo
 python -m unittest -v                                                     # offline tests (mocked model and APIs)
 python -m evals.evaluate_research --pause 90                              # live eval cases in evals/research_cases.py
 python -m evals.evaluate_research --pause 90 --no-reflection              # baseline without the critic
@@ -112,6 +114,36 @@ Each step is done either by the LLM or by deterministic Python code:
 - Python renders the final answer. Title, year, citation count, the OpenAlex API URL and retrieval date (plus Crossref's count when there is a DOI) come from source data. Only the explanation comes from the model.
 - If nothing qualifies, the agent returns `no_match` instead of inventing a paper.
 - Provider notes: one fresh retry on Groq's intermittent `tool_use_failed`, with the same session and budget. `LLM_MAX_TOKENS` (default 800) caps each reply, which keeps runs within the free tier's tokens-per-minute limit (see [LLM choice](#llm-choice)). Long prose is requested as the plain reply, never inside tool-call JSON, because the tested model filled such fields with just the paper title.
+
+### Comparison mode (`--top N`)
+
+`--top N` (N from 2 to 3) asks the agent for a shortlist of N different qualifying papers and one comparison of them instead of a single recommendation, for example `--top 3 "Find papers about retrieval-augmented generation published before 2021 and explain which one is most relevant for open-domain QA."`. The same trust boundary applies to every paper:
+
+- The model reads each paper with `get_paper` and calls `choose_paper` once per paper. Python numbers them in that order (Paper 1, Paper 2, ...), re-checks the constraints of each one, keeps one answer kind for the whole list, and caps the list at N. Calling `choose_paper` again on a listed paper updates its verdict in place.
+- The reply has to mention every shortlisted paper as "Paper k" and no paper outside the list (`paper_reference_problems`). If fewer than N papers qualify, the agent compares the ones it found and the answer says "2 of 3 requested" instead of padding the list. The default length is N+1 to 4N sentences, and a sentence count stated in the request still takes precedence.
+- The reflection agent gets every paper's title, metadata and abstract, labelled Paper 1, Paper 2, ..., and checks each claim against the paper it is about. A comparative claim needs support from both papers.
+- Each extra paper adds 3 tool calls and 3 model turns to the budget (`EXTRA_PER_PAPER`): one read, an optional Crossref cross-check, and one choice. N is capped at 3 (`MAX_TOP`) to stay inside the 120 s limit and the free tier's tokens-per-minute budget.
+- The output is a typed `Shortlist` (a list of `Pick`s, the answer kind and the prose), and the JSONL `summary` record has `papers`, `checks` and `citation_evidence` as lists, one entry per paper.
+
+Offline demo output (fixture data):
+
+```
+Compared papers: 2
+
+Paper 1: Example A: Tool-Using LLM Agents for Repository-Level Program Repair (fixture) (2024) | verdict: useful
+   Authors: A. Example, B. Sample | Venue: Fixture Proceedings
+   Link: https://doi.org/10.0000/fixture.a
+   Citations: 312 according to OpenAlex (https://api.openalex.org/works/W900001, retrieved 2026-11-16)
+   Constraints verified against source data: year > 2022 -> 2024 OK
+
+Paper 2: Example C: A Small Study of Coding Assistants (fixture) (2023) | verdict: partly useful
+   ...
+
+Usefulness comparison:
+Paper 1 builds an LLM agent that edits repositories and runs tests through tools, which is the core of a coding agent. ...
+```
+
+The evaluation below covers single-paper mode only; comparison mode is covered by the offline tests (`TestShortlist`, `TestComparison`).
 
 ## LLM choice
 
@@ -383,7 +415,7 @@ requirements.txt            # full pinned dependency set (also used by the Docke
 src/research/
   config.py                 # Settings: model, base URL, API keys, limits
   provider.py               # opens the OpenAI-compatible PydanticAI model
-  schemas/paper.py          # Comparison, Constraints, Paper, CitationEvidence, Recommendation
+  schemas/paper.py          # Comparison, Constraints, Paper, CitationEvidence, Recommendation, Shortlist
   services/openalex.py      # OpenAlex search, filters, abstract reconstruction (no LLM)
   services/crossref.py      # Crossref citation cross-check (no LLM)
   deps.py                   # ResearchSession: budget, trace, candidates, constraint oracle
