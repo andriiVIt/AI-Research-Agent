@@ -93,7 +93,7 @@ def scripted_model(steps, *, name="scripted-offline"):
     seen_prompts = []
 
     def respond(messages, info):
-        seen_prompts.append(json.dumps([str(m) for m in messages])[:20000])
+        seen_prompts.append(json.dumps([str(m) for m in messages])[:60000])
         return scripted_step(next(calls), info)
 
     model = FunctionModel(respond, model_name=name)

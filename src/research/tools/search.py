@@ -52,6 +52,7 @@ def register_tools(agent: Agent, reply_hint=lambda session: "2-8"):
                      answer_kind: Literal["relevance", "summary", "usefulness"],
                      verdict: Literal["useful", "partly useful", "not useful"] | None = None) -> dict:
         """Select the paper you will answer about. Python verifies it before you write the reply.
+        In comparison mode, call it once per paper: each call adds the next numbered paper.
 
         Args:
             paper_id: A paper_id you already read with get_paper.

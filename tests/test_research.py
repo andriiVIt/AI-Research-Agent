@@ -11,7 +11,8 @@ import httpx2  # noqa: E402
 from pydantic_ai.exceptions import ModelHTTPError  # noqa: E402
 from pydantic_ai.models.function import FunctionModel  # noqa: E402
 
-from research.agents.scout import execute, run  # noqa: E402
+from research.agents.scout import (execute, request_limit_for, run,  # noqa: E402
+                                   tool_limit_for)
 from research.config import Settings  # noqa: E402
 from research.deps import BudgetReached, ResearchSession  # noqa: E402
 from research.fixtures import (FIXTURE_WORKS, fixture_transport, fixture_work,  # noqa: E402
@@ -390,6 +391,88 @@ class TestAgent(unittest.TestCase):
         self.assertFalse([r for r in records if r["event"] == "critique"])
         self.assertIn("state-of-the-art", records[-1]["answer"]["explanation"])
         self.assertFalse(records[-1]["reflection"]["enabled"])
+
+
+COMPARE_REQUEST = ("Compare papers about LLM agents for software engineering published after 2022 "
+                   "and explain which one is most relevant.")
+COMPARE_SEARCH = search(year=(">", 2022))
+READ_C = ("get_paper", {"paper_id": "W900003"})
+COMPARISON = ("Paper 1 builds a tool-using agent that repairs code in repositories. Paper 2 is a "
+              "survey of developers who use coding assistants. Paper 1 is the more relevant one "
+              "because it builds the kind of agent the request asks about.")
+
+
+def run_compare(steps, top=2, request=COMPARE_REQUEST, critic_steps=None):
+    writer = scripted_model(steps)
+    critic = scripted_model(critic_steps) if critic_steps is not None else None
+    async def go():
+        session = make_session()
+        session.top, session.tool_limit = top, tool_limit_for(top)
+        summary = await execute(writer, session, request, critic_model=critic,
+                                request_limit=request_limit_for(top))
+        return session, summary
+    session, summary = asyncio.run(go())
+    return session, summary, writer, critic
+
+
+class TestComparison(unittest.TestCase):
+    def test_scenario_two_papers_are_compared(self):
+        _, summary, _, _ = run_compare([COMPARE_SEARCH, READ_A, READ_C, choose(),
+                                        choose("W900003"), reply(COMPARISON)])
+        self.assertEqual(summary["status"], "answered")
+        self.assertEqual(summary["top"], 2)
+        self.assertEqual([p["paper_id"] for p in summary["answer"]["picks"]],
+                         ["W900001", "W900003"])
+        self.assertEqual([p["openalex_id"] for p in summary["papers"]], ["W900001", "W900003"])
+        self.assertEqual(summary["violations"], [])
+        self.assertEqual([e["count"] for e in summary["citation_evidence"]], [312, 40])
+        rendered = summary["rendered"]
+        self.assertIn("Compared papers: 2\n", rendered)
+        self.assertIn("Paper 1: Example A", rendered)
+        self.assertIn("Paper 2: Example C", rendered)
+        self.assertIn("Comparison:\n" + COMPARISON, rendered)
+        self.assertIn("not full texts", rendered)
+
+    def test_reply_must_mention_every_shortlisted_paper(self):
+        partial = "Paper 1 builds an agent that repairs code. It runs tests through tools. It fits."
+        _, summary, writer, _ = run_compare([COMPARE_SEARCH, READ_A, READ_C, choose(),
+                                             choose("W900003"), reply(partial), reply(COMPARISON)])
+        self.assertEqual(summary["status"], "answered")
+        self.assertIn("never mentions Paper 2", writer.seen_prompts[-1])
+
+    def test_reply_cannot_mention_papers_outside_the_shortlist(self):
+        extra = COMPARISON + " Paper 3 is older."
+        _, summary, writer, _ = run_compare([COMPARE_SEARCH, READ_A, READ_C, choose(),
+                                             choose("W900003"), reply(extra), reply(COMPARISON)])
+        self.assertEqual(summary["answer"]["explanation"], COMPARISON)
+        self.assertIn("there is no Paper 3", writer.seen_prompts[-1])
+
+    def test_reply_before_the_shortlist_is_complete_is_rejected(self):
+        _, summary, writer, _ = run_compare([COMPARE_SEARCH, READ_A, choose(), reply(COMPARISON),
+                                             READ_C, choose("W900003"), reply(COMPARISON)])
+        self.assertEqual(summary["status"], "answered")
+        self.assertIn("choose 1 more paper", writer.seen_prompts[4])
+
+    def test_fewer_qualifying_papers_than_requested_is_reported(self):
+        _, summary, _, _ = run_compare([COMPARE_SEARCH, READ_A, READ_C, choose(),
+                                        choose("W900003"), reply(COMPARISON)], top=3)
+        self.assertEqual(summary["status"], "answered")
+        self.assertIn("Compared papers: 2 of 3 requested", summary["rendered"])
+        self.assertIn("Only 2 of the 3 requested papers", summary["rendered"])
+
+    def test_usefulness_comparison_shows_a_verdict_per_paper(self):
+        _, summary, _, _ = run_compare([COMPARE_SEARCH, READ_A, READ_C,
+                                        choose(kind="usefulness", verdict="useful"),
+                                        choose("W900003", "usefulness", "not useful"),
+                                        reply(COMPARISON)])
+        self.assertIn("(2024) | verdict: useful", summary["rendered"])
+        self.assertIn("(2023) | verdict: not useful", summary["rendered"])
+        self.assertIn("Usefulness comparison:", summary["rendered"])
+
+    def test_budget_grows_with_the_number_of_papers(self):
+        self.assertEqual(tool_limit_for(1), 7)
+        self.assertEqual(tool_limit_for(3), 13)
+        self.assertEqual(request_limit_for(2), 12)
 
 
 SUPPORTED = {"claim": "It studies tool-using LLM agents that repair code", "status": "supported"}
