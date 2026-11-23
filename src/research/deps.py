@@ -46,8 +46,12 @@ class ResearchSession:
     selection: dict | None = None
     no_match_reason: str | None = None
     request: str = ""
-    critiques: list = field(default_factory=list)  
-    revisions: int = 0                              
+    critiques: list = field(default_factory=list)
+    revisions: int = 0
+    # Comparison mode (--top N > 1): choose_paper appends to a numbered shortlist instead.
+    top: int = 1
+    shortlist: list = field(default_factory=list)
+    shortlist_kind: str | None = None
 
     @property
     def today(self):
@@ -147,18 +151,63 @@ class ResearchSession:
         if problems:
             return self._finish(record, {"feedback": "Rejected: " + "; ".join(problems) + "."},
                                 accepted=False)
+        if self.top > 1:
+            return self._add_to_shortlist(record, paper_id, answer_kind, verdict, reply_hint)
         self.selection = {"paper_id": paper_id, "answer_kind": answer_kind, "verdict": verdict}
         self.no_match_reason = None
         return self._finish(record, {"feedback": (
             f"Selected and verified. Now reply with {reply_hint} plain prose sentences that answer "
             "the request. No title heading, citation counts or URLs.")})
 
+    def _add_to_shortlist(self, record, paper_id, answer_kind, verdict, reply_hint):
+        numbers = {pick["paper_id"]: index for index, pick in enumerate(self.shortlist, 1)}
+        if paper_id not in numbers and len(self.shortlist) >= self.top:
+            return self._finish(record, {"feedback": (
+                f"Rejected: the shortlist already has {self.top} papers. Reply with your "
+                "comparison now.")}, accepted=False)
+        # The answer kind belongs to the request, so the latest choice applies to every pick.
+        self.shortlist_kind = answer_kind
+        self.no_match_reason = None
+        if paper_id in numbers:
+            number = numbers[paper_id]
+            self.shortlist[number - 1]["verdict"] = verdict
+            feedback = f"Paper {number} updated."
+        else:
+            self.shortlist.append({"paper_id": paper_id, "verdict": verdict})
+            number = len(self.shortlist)
+            feedback = f"Added as Paper {number} ({number}/{self.top})."
+        missing = self.shortlist_target() - len(self.shortlist)
+        if missing > 0:
+            feedback += (f" Read (get_paper) and choose {missing} more qualifying paper(s) before "
+                         "replying.")
+        else:
+            feedback += (f" Now reply with {reply_hint} plain prose sentences that compare the "
+                         f"papers, referring to them only as Paper 1 to Paper {len(self.shortlist)}."
+                         " No titles, citation counts or URLs.")
+        return self._finish(record, {"feedback": feedback, "paper_number": number})
+
+    def shortlist_target(self):
+        """How many papers the shortlist needs: --top N, or fewer if fewer qualified."""
+        return min(self.top, len(self.candidates))
+
+    def shortlist_problems(self):
+        """Python's checks on the whole shortlist before a comparison reply is accepted."""
+        problems = []
+        for number, pick in enumerate(self.shortlist, 1):
+            problems += [f"Paper {number}: {issue}" for issue in self.verify(pick["paper_id"])]
+            if self.shortlist_kind == "usefulness" and pick["verdict"] is None:
+                problems.append(f"Paper {number} needs a verdict (call choose_paper again)")
+        missing = self.shortlist_target() - len(self.shortlist)
+        if missing > 0:
+            problems.append(f"choose {missing} more paper(s) with choose_paper first")
+        return problems
+
     def report_no_match(self, reason):
         record = self.begin_call("report_no_match", {"reason": reason})
         if self.searches == 0:
             return self._finish(record, {"feedback": "Rejected: call search_papers first."},
                                 accepted=False)
-        self.no_match_reason, self.selection = reason, None
+        self.no_match_reason, self.selection, self.shortlist = reason, None, []
         return self._finish(record, {"feedback": "Recorded. Reply with one or two sentences "
                                                  "explaining that no paper qualified."})
 

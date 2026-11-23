@@ -195,6 +195,72 @@ class TestSession(unittest.TestCase):
             asyncio.run(session.paper("W1"))
 
 
+def shortlist_session(top=2):
+    """A comparison-mode session after one search (year > 2022: W900001 and W900003 qualify)."""
+    async def go():
+        session = make_session()
+        session.top, session.tool_limit = top, 20
+        await session.search(Constraints.model_validate(constraints(year=(">", 2022))))
+        for paper_id in ("W900001", "W900003"):
+            await session.paper(paper_id)
+        return session
+    return asyncio.run(go())
+
+
+class TestShortlist(unittest.TestCase):
+    def test_choices_are_numbered_in_order(self):
+        session = shortlist_session()
+        first = session.choose("W900003", "relevance", None, "3-8")
+        self.assertEqual(first["paper_number"], 1)
+        self.assertIn("choose 1 more", first["feedback"])
+        self.assertEqual(session.shortlist_problems(),
+                         ["choose 1 more paper(s) with choose_paper first"])
+        second = session.choose("W900001", "relevance", None, "3-8")
+        self.assertEqual(second["paper_number"], 2)
+        self.assertIn("Paper 1 to Paper 2", second["feedback"])
+        self.assertEqual([p["paper_id"] for p in session.shortlist], ["W900003", "W900001"])
+        self.assertEqual(session.shortlist_problems(), [])
+        self.assertIsNone(session.selection)
+
+    def test_shortlist_is_capped_and_rechoosing_updates_in_place(self):
+        session = shortlist_session(top=2)
+        session.choose("W900001", "relevance", None, "3-8")
+        session.choose("W900003", "usefulness", "useful", "3-8")
+        # Switching to a usefulness answer needs a verdict for the earlier pick too.
+        self.assertEqual(session.shortlist_kind, "usefulness")
+        self.assertEqual(session.shortlist_problems(),
+                         ["Paper 1 needs a verdict (call choose_paper again)"])
+        updated = session.choose("W900001", "usefulness", "partly useful", "3-8")
+        self.assertEqual(updated["paper_number"], 1)
+        self.assertEqual(session.shortlist_problems(), [])
+        session.candidates["W900002"] = session.candidates["W900001"].model_copy(
+            update={"openalex_id": "W900002"})
+        session.detailed.add("W900002")
+        full = session.choose("W900002", "usefulness", "useful", "3-8")
+        self.assertFalse(full["accepted"])
+        self.assertIn("already has 2 papers", full["feedback"])
+
+    def test_target_shrinks_when_fewer_papers_qualify(self):
+        session = shortlist_session(top=3)
+        self.assertEqual(session.shortlist_target(), 2)
+        session.choose("W900001", "relevance", None, "4-12")
+        result = session.choose("W900003", "relevance", None, "4-12")
+        self.assertIn("Now reply", result["feedback"])
+
+    def test_unread_or_unknown_papers_cannot_be_shortlisted(self):
+        session = shortlist_session()
+        self.assertFalse(session.choose("W123", "relevance", None, "3-8")["accepted"])
+        session.detailed.discard("W900003")
+        self.assertFalse(session.choose("W900003", "relevance", None, "3-8")["accepted"])
+        self.assertEqual(session.shortlist, [])
+
+    def test_no_match_clears_the_shortlist(self):
+        session = shortlist_session()
+        session.choose("W900001", "relevance", None, "3-8")
+        session.report_no_match("Nothing fits.")
+        self.assertEqual(session.shortlist, [])
+
+
 SEARCH_AFTER_2022 = search(year=(">", 2022), citations=(">=", 100))
 AGENTS_REQUEST = ("Find a paper about LLM agents for software engineering published after 2022 with "
                   "at least 100 citations. Explain why it is relevant and give the citation source.")

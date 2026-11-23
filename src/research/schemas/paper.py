@@ -102,6 +102,27 @@ class Recommendation(BaseModel):
     explanation: str
 
 
+class Pick(BaseModel):
+    """One shortlisted paper in comparison mode, numbered in the order it was chosen."""
+    model_config = ConfigDict(extra="forbid")
+    paper_id: str
+    verdict: Literal["useful", "partly useful", "not useful"] | None = None
+
+
+class Shortlist(BaseModel):
+    """Comparison mode (--top N): the verified shortlist plus the model's comparative prose.
+    The prose refers to the papers as "Paper 1", "Paper 2", ... in shortlist order."""
+    model_config = ConfigDict(extra="forbid")
+    picks: list[Pick]
+    answer_kind: Literal["relevance", "summary", "usefulness"]
+    requested: int
+    explanation: str
+
+    @property
+    def paper_ids(self):
+        return [pick.paper_id for pick in self.picks]
+
+
 class NoMatch(BaseModel):
     reason: str
 
