@@ -6,7 +6,7 @@ An AI research assistant that searches papers on OpenAlex, applies year and cita
 - "Find a paper about retrieval-augmented generation published before 2021 with more than 500 citations. Summarize its contribution in 5-7 sentences."
 - "Find a recent paper about AI agents using tools and explain whether it would be useful for someone building autonomous software agents."
 
-Topic, year, citation count and operators (`>`, `>=`, `<`, `<=`, `==`) can be combined freely; "recent" means the current year or the two before it.
+Topic, year, citation count and operators (`>`, `>=`, `<`, `<=`, `==`) can be combined freely; "recent" means the current year or the two before it. When a request gives no year, citation or recency constraint, the agent fetches the 15 most relevant OpenAlex results and ranks them by citation count, so well-established papers come first.
 
 ## Setup
 
