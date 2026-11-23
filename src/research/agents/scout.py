@@ -148,7 +148,7 @@ def build_agent(model, *, critic_model=None, temperature=0.2, top=1, tool_limit=
         if problems:
             raise ModelRetry("Reply rejected by Python checks: " + "; ".join(problems)
                              + ". Reply again with prose sentences only.")
-        if critic is None or session.top > 1:  # the critic reviews single answers only (for now)
+        if critic is None:
             return text
         # Reflection: only replies that already pass the cheap deterministic checks are reviewed.
         critique, record = await review(critic, session, text)
@@ -163,7 +163,9 @@ def build_agent(model, *, critic_model=None, temperature=0.2, top=1, tool_limit=
         raise ModelRetry("A reviewer checked your reply against the paper's title and abstract and "
                          "found: " + "; ".join(p.rstrip(". ") for p in critique.problems)
                          + f". Rewrite the reply with {sentence_target(session)} prose sentences, "
-                         "keeping only claims the title and abstract support." + kind_hint)
+                         "keeping only claims the "
+                         + ("title and abstract" if session.top == 1 else "titles and abstracts")
+                         + " support." + kind_hint)
 
     return agent
 

@@ -469,6 +469,29 @@ class TestComparison(unittest.TestCase):
         self.assertIn("(2023) | verdict: not useful", summary["rendered"])
         self.assertIn("Usefulness comparison:", summary["rendered"])
 
+    def test_critic_reviews_the_comparison_against_every_paper(self):
+        flagged = {"claim": "Paper 2 is a large-scale benchmark study", "status": "unsupported",
+                   "fix": "say it is a survey of developers using coding assistants"}
+        ok = {"claim": "Paper 2 is a survey of developers", "status": "supported"}
+        draft = COMPARISON.replace("a survey of developers who use coding assistants",
+                                   "a large-scale benchmark study")
+        session, summary, writer, critic = run_compare(
+            [COMPARE_SEARCH, READ_A, READ_C, choose(), choose("W900003"), reply(draft),
+             reply(COMPARISON)],
+            critic_steps=[critique(flagged), critique(ok)])
+        self.assertEqual(summary["status"], "answered")
+        self.assertEqual(summary["answer"]["explanation"], COMPARISON)
+        self.assertEqual(summary["reflection"]["revisions"], 1)
+        prompt = critic.seen_prompts[0]
+        self.assertIn("Paper 1 title: Example A", prompt)
+        self.assertIn("Paper 2 title: Example C", prompt)
+        self.assertIn("A survey of developers using coding assistants", prompt)
+        self.assertIn("large-scale benchmark study", writer.seen_prompts[-1])
+        self.assertIn("titles and abstracts support", writer.seen_prompts[-1])
+        reviews = [r for r in session.trace if r["event"] == "critique"]
+        self.assertEqual(reviews[0]["paper_ids"], ["W900001", "W900003"])
+        self.assertIn("after 1 rewrite and found no unsupported claims", summary["rendered"])
+
     def test_budget_grows_with_the_number_of_papers(self):
         self.assertEqual(tool_limit_for(1), 7)
         self.assertEqual(tool_limit_for(3), 13)
