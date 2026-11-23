@@ -124,6 +124,21 @@ class TestSources(unittest.TestCase):
         self.assertEqual(papers[0].doi, "10.0000/fixture.a")
         self.assertTrue(papers[0].abstract.startswith("We present an agent"))
 
+    def test_broad_search_sorts_by_citations_client_side(self):
+        seen = []
+        async def search(c):
+            async with httpx2.AsyncClient(transport=fixture_transport(seen=seen)) as http:
+                return await OpenAlexClient(http, SECRET, today=TODAY).search(c)
+        papers, _ = asyncio.run(search(Constraints.model_validate(constraints())))
+        counts = [paper.cited_by_count for paper in papers]
+        self.assertEqual(counts, sorted(counts, reverse=True))
+        self.assertEqual(seen[0].url.params["per_page"], "15")
+        self.assertNotIn("sort", seen[0].url.params)
+        # With any numeric constraint the source order is kept and the page stays small.
+        papers, _ = asyncio.run(search(Constraints.model_validate(constraints(citations=(">", 0)))))
+        self.assertEqual([p.openalex_id for p in papers][:3], ["W900001", "W900002", "W900003"])
+        self.assertEqual(seen[1].url.params["per_page"], "8")
+
     def test_source_errors_never_leak_key(self):
         def handler(request):
             raise httpx2.ConnectError(f"cannot reach {request.url}")
